@@ -1,0 +1,15 @@
+.{
+    .name = "word_game",
+    .version = "0.0.1",
+    .dependencies = .{
+        .@"raylib-zig" = .{
+            .url = "https://github.com/Not-Nik/raylib-zig/archive/devel.tar.gz",
+            .hash = "122043ae5d7dc535006aca53271bf37b64fcbb66851a7982f5914fa6166747884f60",
+        },
+        .string = .{
+            .url = "https://github.com/JakubSzark/zig-string/archive/refs/heads/master.tar.gz",
+            .hash = "12201b6adb39801a0956ab8450fcc96417752c19b690a00603bb10f3d802095b2426",
+        },
+    },
+    .paths = .{""},
+}
