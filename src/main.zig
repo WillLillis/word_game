@@ -101,7 +101,7 @@ const TargetBlock = struct {
             rl.drawText(self.text.str()[0 .. self.text.len() - 1 :0], @as(i32, @intFromFloat(self.pos.x)), @as(i32, @intFromFloat(self.pos.y)), theme.target_font_size, self.color);
         } else {
             var curr_x = self.pos.x;
-            for (0..self.text.len() - 1) |_| {
+            for (0..self.text.len() - 1) |_| { // don't draw rectangle for sentinel zero value
                 rl.drawRectangle(@as(i32, @intFromFloat(curr_x)), @as(i32, @intFromFloat(self.pos.y)), @as(i32, @intFromFloat(text_size.x)), @as(i32, @intFromFloat(text_size.y)), rl.Color.green);
                 curr_x += text_size.x + theme.target_spacing;
             }
@@ -149,12 +149,14 @@ const GameState = struct {
     curr_letters: WordBuilder,
     is_building: bool = false,
     letters_center: Vector2 = theme.letter_center,
+    word_store: void, // TODO -- add in https://github.com/deckarep/ziglang-set
 
     fn init(allocator: std.mem.Allocator, letters: []const u8, targets: *const std.ArrayList([]const u8)) !Self {
         var state = Self{
             .letter_blocks = std.ArrayList(LetterBlock).init(allocator),
             .target_words = std.ArrayList(TargetBlock).init(allocator),
             .curr_letters = try WordBuilder.init(allocator, letters.len),
+            .word_store = {},
         };
         try state.add_letters(letters);
         try state.add_targets(allocator, targets);
@@ -186,6 +188,8 @@ const GameState = struct {
         }
         const delta = 2.0 * std.math.pi / @as(f32, @floatFromInt(letters.len));
         const radius = theme.letters_radius; // NOTE: Determine programmatically later?
+                                             // - determine radius of circle needed for all letter block
+                                             // circles with given radius to fit with some amount of padding
 
         for (letters, 0..) |letter, i| {
             const x = self.letters_center.x + radius * std.math.cos(delta * @as(f32, @floatFromInt(i)));
@@ -261,6 +265,9 @@ pub fn main() !void {
     const allocator = gpa.allocator();
     defer std.debug.assert(gpa.deinit() == .ok);
 
+
+    // let's just try to read the words from a file into a hashset...
+
     rl.initWindow(screenWidth, screenHeight, "Word Game");
     defer rl.closeWindow(); // Close window and OpenGL context
 
@@ -288,6 +295,13 @@ pub fn main() !void {
     };
     var state = try GameState.init(allocator, &letters, &targets);
     defer state.deinit();
+
+    // try state.word_store.put("Hello", .{});
+    // if (state.word_store.contains("Hello")) {
+    //     std.debug.print("It worked!", .{});
+    // } else {
+    //     std.debug.print("What?", .{});
+    // }
 
     try state.add_letters(letters[0..]);
 
