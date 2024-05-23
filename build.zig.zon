@@ -10,6 +10,10 @@
             .url = "https://github.com/JakubSzark/zig-string/archive/refs/heads/master.tar.gz",
             .hash = "12201b6adb39801a0956ab8450fcc96417752c19b690a00603bb10f3d802095b2426",
         },
+        .ziglangSet = .{
+            .url = "https://github.com/deckarep/ziglang-set/archive/refs/heads/main.tar.gz",
+            .hash = "12204f733d2801b2857d0d7a11237eed4312885bcc94c3e059654d3e1600339428a1",
+        },
     },
     .paths = .{""},
 }

@@ -46,6 +46,9 @@ pub fn build(b: *std.Build) !void {
     // exe.addModule("string", string.module("string"));
     exe.root_module.addImport("string", string.module("string"));
 
+    const ziglangSet = b.dependency("ziglangSet", .{});
+    exe.root_module.addImport("ziglangSet", ziglangSet.module("ziglangSet"));
+
     const run_cmd = b.addRunArtifact(exe);
     const run_step = b.step("run", "Run word_game");
     run_step.dependOn(&run_cmd.step);

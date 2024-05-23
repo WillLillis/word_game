@@ -2,16 +2,21 @@ const std = @import("std");
 const rl = @import("raylib");
 const rlm = @import("raylib-math");
 const String = @import("string").String;
+const set = @import("ziglangSet");
 
 const Vector2 = rl.Vector2;
 
 // We'll just start with an assumption that there will be no more than
-// 10 target words. This limitation is purely to simplify the rendering code...
+// 10 target words. This limitation is purely to simplify the rendering
+// code for now...
 const PADDING: i32 = 10;
 const MAX_TARGETS: usize = 10;
 const MAX_WORD_LEN: usize = 128;
+const MAX_MSG_LEN: usize = 128;
 
-const Theme = struct {
+// TODO: Clean up naming here...
+// Maybe split up config into sub structs?
+const Config = struct {
     target_cover: rl.Color,
     target_text: rl.Color,
     letter_circle: rl.Color,
@@ -23,9 +28,12 @@ const Theme = struct {
     target_font_size: f32,
     target_spacing: f32,
     curr_letter_font_size: f32,
+    hover_msg_font_size: f32,
+    hover_msg_dur: f32,
+    bonus_letter_val: u32,
 };
 
-const theme = Theme{
+const config = Config{
     .target_cover = rl.Color.dark_blue,
     .target_text = rl.Color.dark_green,
     .letter_circle = rl.Color.black,
@@ -35,8 +43,62 @@ const theme = Theme{
     .letter_circle_radius = 20,
     .letters_radius = 100,
     .target_font_size = 50,
+    .hover_msg_font_size = 40,
     .target_spacing = 1,
     .curr_letter_font_size = 100,
+    .hover_msg_dur = 1.0,
+    .bonus_letter_val = 100,
+};
+
+const DisplayMessageTag = enum {
+    bonus_word,
+    not_a_word,
+};
+
+const DisplayMessage = union(DisplayMessageTag) {
+    bonus_word: u32,
+    not_a_word: void,
+};
+
+const HoverMessage = struct {
+    const Self = @This();
+
+    message: ?DisplayMessage,
+    time: f32,
+
+    fn init() Self {
+        return Self{
+            .message = null,
+            .time = 0,
+        };
+    }
+
+    fn step_counter(self: *Self, delta: f32) void {
+        if (self.time <= delta) {
+            self.time = 0;
+        } else {
+            self.time -= delta;
+        }
+    }
+
+    fn bonus_word(word: []const u8) Self {
+        return Self{ .message = DisplayMessage{ .bonus_word = @as(u32, @intCast(word.len)) * config.bonus_letter_val }, .time = config.hover_msg_dur };
+    }
+
+    fn buf_print(self: *const Self, buf: *[MAX_MSG_LEN:0]u8) !void {
+        if (self.message) |msg| {
+            switch (msg) {
+                .bonus_word => |points| {
+                    _ = try std.fmt.bufPrintZ(buf, "Bonus Word: +{d}", .{points});
+                    rl.drawText(buf, 250, 250, config.hover_msg_font_size, rl.Color.gold);
+                },
+                .not_a_word => {
+                    _ = try std.fmt.bufPrintZ(buf, "Not A Word!", .{});
+                    rl.drawText(buf, 250, 250, config.hover_msg_font_size, rl.Color.gold);
+                },
+            }
+        }
+    }
 };
 
 const LetterBlock = struct {
@@ -64,11 +126,11 @@ const LetterBlock = struct {
 
     fn draw(self: *const Self) void {
         if (self.selected) {
-            rl.drawCircleV(self.pos, self.radius * 1.25, theme.letter_select);
+            rl.drawCircleV(self.pos, self.radius * 1.25, config.letter_select);
         }
-        rl.drawCircleV(self.pos, self.radius, theme.letter_circle);
+        rl.drawCircleV(self.pos, self.radius, config.letter_circle);
         const radius = @as(i32, @intFromFloat(self.radius));
-        rl.drawText(&self.text, @as(i32, @intFromFloat(self.pos.x)) - @divTrunc(radius, 4), @as(i32, @intFromFloat(self.pos.y)) - @divTrunc(radius, 2), radius, theme.letter_text);
+        rl.drawText(&self.text, @as(i32, @intFromFloat(self.pos.x)) - @divTrunc(radius, 4), @as(i32, @intFromFloat(self.pos.y)) - @divTrunc(radius, 2), radius, config.letter_text);
     }
 };
 
@@ -87,7 +149,7 @@ const TargetBlock = struct {
         return Self{
             .pos = pos,
             .text = inner_text,
-            .color = theme.letter_circle,
+            .color = config.letter_circle,
         };
     }
 
@@ -96,14 +158,14 @@ const TargetBlock = struct {
     }
 
     fn draw(self: *const Self) void {
-        const text_size = rl.measureTextEx(rl.getFontDefault(), "A", theme.target_font_size, theme.target_spacing);
+        const text_size = rl.measureTextEx(rl.getFontDefault(), "A", config.target_font_size, config.target_spacing);
         if (self.visible) {
-            rl.drawText(self.text.str()[0 .. self.text.len() - 1 :0], @as(i32, @intFromFloat(self.pos.x)), @as(i32, @intFromFloat(self.pos.y)), theme.target_font_size, self.color);
+            rl.drawText(self.text.str()[0 .. self.text.len() - 1 :0], @as(i32, @intFromFloat(self.pos.x)), @as(i32, @intFromFloat(self.pos.y)), config.target_font_size, self.color);
         } else {
             var curr_x = self.pos.x;
             for (0..self.text.len() - 1) |_| { // don't draw rectangle for sentinel zero value
                 rl.drawRectangle(@as(i32, @intFromFloat(curr_x)), @as(i32, @intFromFloat(self.pos.y)), @as(i32, @intFromFloat(text_size.x)), @as(i32, @intFromFloat(text_size.y)), rl.Color.green);
-                curr_x += text_size.x + theme.target_spacing;
+                curr_x += text_size.x + config.target_spacing;
             }
         }
     }
@@ -148,37 +210,64 @@ const GameState = struct {
     target_words: std.ArrayList(TargetBlock), // swap out raw string for some target block
     curr_letters: WordBuilder,
     is_building: bool = false,
-    letters_center: Vector2 = theme.letter_center,
-    word_store: void, // TODO -- add in https://github.com/deckarep/ziglang-set
+    letters_center: Vector2 = config.letter_center,
+    word_store: set.HashSetManaged([]const u8), // this is using the pointer isn't it...
+    bonus_words: set.Set([]const u8),
+    curr_hover_msg: HoverMessage = HoverMessage.init(), // need to bundle the countdown with the message...
+    score: u32 = 0,
+    // TODO: Add some var(s) here to track which "message" we're displaying
+    //  - e.g. bonus word, got a word, etc.
+    //  need to track the score
 
     fn init(allocator: std.mem.Allocator, letters: []const u8, targets: *const std.ArrayList([]const u8)) !Self {
         var state = Self{
             .letter_blocks = std.ArrayList(LetterBlock).init(allocator),
             .target_words = std.ArrayList(TargetBlock).init(allocator),
             .curr_letters = try WordBuilder.init(allocator, letters.len),
-            .word_store = {},
+            //.word_store = set.Set([]const u8).init(allocator), // this leads to a crash with an allocation failure
+            .word_store = try set.HashSetManaged([]const u8).initCapacity(allocator, 3000), // this doesn't
+            .bonus_words = set.Set([]const u8).init(allocator),
         };
         try state.add_letters(letters);
         try state.add_targets(allocator, targets);
+        try state.load_word_store(allocator, null);
+
         return state;
     }
 
-    fn deinit(self: *Self) void {
+    fn deinit(self: *Self, allocator: std.mem.Allocator) void {
         self.letter_blocks.deinit();
         for (self.target_words.items) |*word| {
             word.deinit();
         }
         self.target_words.deinit();
         self.curr_letters.deinit();
+        var store_iter = self.word_store.iterator();
+        while (store_iter.next()) |elem| {
+            allocator.free(elem.*);
+        }
+        self.word_store.deinit();
+        self.bonus_words.deinit();
     }
 
-    fn render(self: *const Self) void {
+    fn render(self: *const Self) !void {
         for (self.target_words.items) |block| {
             block.draw();
         }
 
         for (self.letter_blocks.items) |block| {
             block.draw();
+        }
+
+        var buf: [@max(MAX_WORD_LEN, MAX_MSG_LEN):0]u8 = undefined;
+        if (self.curr_letters.curr_letters.len() > 0) {
+            _ = try std.fmt.bufPrintZ(&buf, "{s}", .{self.curr_letters.curr_letters.str()});
+            rl.drawText(&buf, 300, 20, config.curr_letter_font_size, rl.Color.light_gray);
+        }
+
+        if (self.curr_hover_msg.time > 0) {
+            try self.curr_hover_msg.buf_print(&buf);
+            rl.drawText(&buf, 250, 250, config.hover_msg_font_size, rl.Color.gold);
         }
     }
 
@@ -187,20 +276,20 @@ const GameState = struct {
             return;
         }
         const delta = 2.0 * std.math.pi / @as(f32, @floatFromInt(letters.len));
-        const radius = theme.letters_radius; // NOTE: Determine programmatically later?
-                                             // - determine radius of circle needed for all letter block
-                                             // circles with given radius to fit with some amount of padding
+        const radius = config.letters_radius;
+        // TODO: determine radius of circle needed for all letter block
+        // circles with given radius to fit with some amount of padding
 
         for (letters, 0..) |letter, i| {
             const x = self.letters_center.x + radius * std.math.cos(delta * @as(f32, @floatFromInt(i)));
             const y = self.letters_center.y + radius * std.math.sin(delta * @as(f32, @floatFromInt(i)));
-            const block = LetterBlock.init(Vector2.init(x, y), theme.letter_circle_radius, letter);
+            const block = LetterBlock.init(Vector2.init(x, y), config.letter_circle_radius, letter);
             try self.letter_blocks.append(block);
         }
     }
 
     fn add_targets(self: *Self, allocator: std.mem.Allocator, targets: *const std.ArrayList([]const u8)) !void {
-        const word_height = rl.measureTextEx(rl.getFontDefault(), "A", theme.target_font_size, theme.target_spacing).y; // NOTE: string to pass in besides " "? or just grab at comptime?
+        const word_height = rl.measureTextEx(rl.getFontDefault(), "A", config.target_font_size, config.target_spacing).y; // NOTE: string to pass in besides " "? or just grab at comptime?fn
         var max_word_len: u64 = 0;
         var curr_pos = Vector2.init(PADDING, PADDING);
 
@@ -213,6 +302,26 @@ const GameState = struct {
                 curr_pos.x += @as(f32, @floatFromInt(max_word_len));
                 curr_pos.y = PADDING;
             }
+        }
+    }
+
+    fn load_word_store(self: *Self, allocator: std.mem.Allocator, path: ?[]const u8) !void {
+        var file: std.fs.File = undefined;
+        if (path) |custom_path| {
+            if (std.fs.path.isAbsolute(custom_path)) {
+                file = try std.fs.cwd().openFile(custom_path, .{});
+            }
+        } else {
+            file = try std.fs.cwd().openFile("words.txt", .{});
+        }
+
+        var buf_reader = std.io.bufferedReader(file.reader());
+        var in_stream = buf_reader.reader();
+
+        var buf: [32]u8 = undefined;
+        while (try in_stream.readUntilDelimiterOrEof(&buf, '\n')) |line| {
+            const copy = try allocator.dupe(u8, line);
+            _ = try self.word_store.add(copy);
         }
     }
 
@@ -235,18 +344,29 @@ const GameState = struct {
         }
     }
 
-
-    fn submit_word(self: *Self) void {
+    fn submit_word(self: *Self) !void {
         const submission = self.curr_letters.curr_letters.str();
+        std.debug.print("Submission: {s}\n", .{submission});
+
         for (self.target_words.items) |*word| {
-            if (std.mem.eql(u8, submission, word.text.str()[0 .. word.text.str().len - 1])) { // Don't compare against the sentinel 0 value
+            if (!word.visible and std.mem.eql(u8, submission, word.text.str()[0 .. word.text.str().len - 1])) { // Don't compare against the sentinel 0 value
                 word.visible = true;
-                break;
+                return;
             }
+        }
+
+        std.debug.print("WHAT? {}\n", .{self.word_store.contains("SHE")});
+        std.debug.print("Word store has it: {}\n", .{self.word_store.contains(submission)});
+        std.debug.print("Bonus words has it: {}\n", .{self.bonus_words.contains(submission)});
+
+        if (self.word_store.contains(submission) and !self.bonus_words.contains(submission)) {
+            _ = try self.bonus_words.add(submission);
+            std.debug.print("Bonus word!", .{});
+            self.curr_hover_msg = HoverMessage.bonus_word(submission);
         }
     }
 
-    fn check_overlap(self: *const Self, pos: Vector2) ?usize {
+    fn check_letter_overlap(self: *const Self, pos: Vector2) ?usize {
         for (self.letter_blocks.items, 0..) |*letter, i| {
             if (letter.containsPoint(pos)) {
                 return i;
@@ -256,6 +376,9 @@ const GameState = struct {
     }
 };
 
+// TODO: Look into using a HashMap([]const u8, bool) to keep track of which bonus
+// words have been used, or just use another hashset
+// work on animations for getting a word, bonus word, etc.
 pub fn main() !void {
     // Initialization
     //--------------------------------------------------------------------------------------
@@ -264,7 +387,6 @@ pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{ .verbose_log = true }){};
     const allocator = gpa.allocator();
     defer std.debug.assert(gpa.deinit() == .ok);
-
 
     // let's just try to read the words from a file into a hashset...
 
@@ -280,7 +402,7 @@ pub fn main() !void {
     try targets.append("IT");
     try targets.append("WORKS");
     std.sort.insertion([]const u8, targets.items, .{}, GameState.targets_less_than);
-    
+
     const letters = [_]u8{
         'H',
         'E',
@@ -294,27 +416,19 @@ pub fn main() !void {
         'S',
     };
     var state = try GameState.init(allocator, &letters, &targets);
-    defer state.deinit();
-
-    // try state.word_store.put("Hello", .{});
-    // if (state.word_store.contains("Hello")) {
-    //     std.debug.print("It worked!", .{});
-    // } else {
-    //     std.debug.print("What?", .{});
-    // }
-
-    try state.add_letters(letters[0..]);
+    defer state.deinit(allocator);
 
     var last_letter: ?usize = null;
-    var curr_letters: [MAX_WORD_LEN:0]u8 = undefined;
+
+    // TODO: Keep track of LetterBlock's we're accumulating,
+    // see if we can allow "unselecting"
 
     // Main game loop
     while (!rl.windowShouldClose()) { // Detect window close button or ESC key
         // State update
         //----------------------------------------------------------------------------------
-        // Enumerate cases here...
         const mouse_pos = rl.getMousePosition();
-        const selected_letter = state.check_overlap(mouse_pos);
+        const selected_letter = state.check_letter_overlap(mouse_pos);
         if (state.is_building) {
             if (rl.isMouseButtonDown(rl.MouseButton.mouse_button_left)) {
                 if (selected_letter) |idx| {
@@ -327,7 +441,7 @@ pub fn main() !void {
                 }
             } else {
                 state.is_building = false;
-                state.submit_word();
+                try state.submit_word();
                 state.curr_letters.clear();
                 last_letter = null;
                 for (state.letter_blocks.items) |*letter| {
@@ -346,6 +460,8 @@ pub fn main() !void {
             }
         }
 
+        state.curr_hover_msg.step_counter(rl.getFrameTime());
+
         //----------------------------------------------------------------------------------
 
         // Draw
@@ -355,12 +471,8 @@ pub fn main() !void {
 
         rl.clearBackground(rl.Color.white);
 
-        state.render();
+        try state.render();
 
-        if (state.curr_letters.curr_letters.len() > 0) {
-            _ = try std.fmt.bufPrintZ(&curr_letters, "{s}", .{state.curr_letters.curr_letters.str()});
-            rl.drawText(&curr_letters, 300, 20, theme.curr_letter_font_size, rl.Color.light_gray);
-        }
         //----------------------------------------------------------------------------------
     }
 }
