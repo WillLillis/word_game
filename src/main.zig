@@ -30,7 +30,9 @@ const Config = struct {
     curr_letter_font_size: f32,
     hover_msg_font_size: f32,
     hover_msg_dur: f32,
+    target_letter_val: u32,
     bonus_letter_val: u32,
+    score_font_size: f32,
 };
 
 const config = Config{
@@ -47,17 +49,23 @@ const config = Config{
     .target_spacing = 1,
     .curr_letter_font_size = 100,
     .hover_msg_dur = 1.0,
+    .target_letter_val = 200,
     .bonus_letter_val = 100,
+    .score_font_size = 50,
 };
 
 const DisplayMessageTag = enum {
+    target_word,
     bonus_word,
     not_a_word,
+    prev_found_word,
 };
 
 const DisplayMessage = union(DisplayMessageTag) {
+    target_word: u32,
     bonus_word: u32,
     not_a_word: void,
+    prev_found_word: void,
 };
 
 const HoverMessage = struct {
@@ -73,6 +81,7 @@ const HoverMessage = struct {
         };
     }
 
+    /// Returns true if the current message remained active after the step, false otherwise
     fn step_counter(self: *Self, delta: f32) void {
         if (self.time <= delta) {
             self.time = 0;
@@ -81,20 +90,36 @@ const HoverMessage = struct {
         }
     }
 
+    fn target_word(word: []const u8) Self {
+        return Self{ .message = DisplayMessage{ .target_word = @as(u32, @intCast(word.len)) * config.target_letter_val }, .time = config.hover_msg_dur };
+    }
+
     fn bonus_word(word: []const u8) Self {
         return Self{ .message = DisplayMessage{ .bonus_word = @as(u32, @intCast(word.len)) * config.bonus_letter_val }, .time = config.hover_msg_dur };
+    }
+
+    fn bad_word() Self {
+        return Self{ .message = DisplayMessage{ .not_a_word = {} }, .time = config.hover_msg_dur };
+    }
+
+    fn prev_found_word() Self {
+        return Self{ .message = DisplayMessage{ .prev_found_word = {} }, .time = config.hover_msg_dur };
     }
 
     fn buf_print(self: *const Self, buf: *[MAX_MSG_LEN:0]u8) !void {
         if (self.message) |msg| {
             switch (msg) {
+                .target_word => |points| {
+                    _ = try std.fmt.bufPrintZ(buf, "+{d}", .{points});
+                },
                 .bonus_word => |points| {
                     _ = try std.fmt.bufPrintZ(buf, "Bonus Word: +{d}", .{points});
-                    rl.drawText(buf, 250, 250, config.hover_msg_font_size, rl.Color.gold);
                 },
                 .not_a_word => {
                     _ = try std.fmt.bufPrintZ(buf, "Not A Word!", .{});
-                    rl.drawText(buf, 250, 250, config.hover_msg_font_size, rl.Color.gold);
+                },
+                .prev_found_word => {
+                    _ = try std.fmt.bufPrintZ(buf, "Already found", .{});
                 },
             }
         }
@@ -214,23 +239,56 @@ const GameState = struct {
     word_store: set.HashSetManaged([]const u8), // this is using the pointer isn't it...
     bonus_words: set.Set([]const u8),
     curr_hover_msg: HoverMessage = HoverMessage.init(), // need to bundle the countdown with the message...
+    hover_msg_buf: [@max(MAX_WORD_LEN, MAX_MSG_LEN):0]u8 = undefined,
+    new_hover_msg: bool = false,
     score: u32 = 0,
-    // TODO: Add some var(s) here to track which "message" we're displaying
-    //  - e.g. bonus word, got a word, etc.
-    //  need to track the score
+    score_buf: [18:0]u8 = undefined,
 
-    fn init(allocator: std.mem.Allocator, letters: []const u8, targets: *const std.ArrayList([]const u8)) !Self {
+    fn init(allocator: std.mem.Allocator) !Self {
         var state = Self{
             .letter_blocks = std.ArrayList(LetterBlock).init(allocator),
             .target_words = std.ArrayList(TargetBlock).init(allocator),
-            .curr_letters = try WordBuilder.init(allocator, letters.len),
+            .curr_letters = undefined, //try WordBuilder.init(allocator, letters.len),
             //.word_store = set.Set([]const u8).init(allocator), // this leads to a crash with an allocation failure
             .word_store = try set.HashSetManaged([]const u8).initCapacity(allocator, 3000), // this doesn't
             .bonus_words = set.Set([]const u8).init(allocator),
         };
-        try state.add_letters(letters);
-        try state.add_targets(allocator, targets);
+        state.score_buf[state.score_buf.len] = 0; // still needed?
         try state.load_word_store(allocator, null);
+
+        var targets = std.ArrayList([]const u8).init(allocator);
+        defer targets.deinit();
+        var gen = std.Random.Xoshiro256.init(42069);
+        const random = gen.random();
+        for (0..3) |_| {
+            const target_idx = std.rand.uintLessThan(random, usize, state.word_store.cardinality() - 1);
+
+            var idx: usize = 0;
+            var iter = state.word_store.iterator();
+            while (iter.next()) |elem| {
+                defer idx += 1;
+                if (idx == target_idx) {
+                    try targets.append(elem.*);
+                    break;
+                }
+            }
+        }
+        std.sort.insertion([]const u8, targets.items, .{}, GameState.targets_less_than);
+        try state.add_targets(allocator, &targets);
+        // var letters: set.Set(u8) = set.Set(u8).init(allocator);
+        // TODO: Need to do some de-duping here... (need to maintain multiple copies, but only 
+        // the most in any given word
+        // Also shuffle
+        var letters = std.ArrayList(u8).init(allocator);
+        defer letters.deinit();
+        for (targets.items) |word| {
+            for (0..word.len) |i| {
+                _ = try letters.append(word[i]);
+            }
+        }
+        // state.curr_letters = try WordBuilder.init(allocator, letters.cardinality());
+        state.curr_letters = try WordBuilder.init(allocator, letters.items.len);
+        try state.add_letters(letters.items);
 
         return state;
     }
@@ -250,7 +308,7 @@ const GameState = struct {
         self.bonus_words.deinit();
     }
 
-    fn render(self: *const Self) !void {
+    fn render(self: *Self) !void {
         for (self.target_words.items) |block| {
             block.draw();
         }
@@ -259,16 +317,22 @@ const GameState = struct {
             block.draw();
         }
 
-        var buf: [@max(MAX_WORD_LEN, MAX_MSG_LEN):0]u8 = undefined;
         if (self.curr_letters.curr_letters.len() > 0) {
-            _ = try std.fmt.bufPrintZ(&buf, "{s}", .{self.curr_letters.curr_letters.str()});
-            rl.drawText(&buf, 300, 20, config.curr_letter_font_size, rl.Color.light_gray);
+            _ = try std.fmt.bufPrintZ(&self.hover_msg_buf, "{s}", .{self.curr_letters.curr_letters.str()});
+            rl.drawText(&self.hover_msg_buf, 300, 20, config.curr_letter_font_size, rl.Color.light_gray);
         }
 
         if (self.curr_hover_msg.time > 0) {
-            try self.curr_hover_msg.buf_print(&buf);
-            rl.drawText(&buf, 250, 250, config.hover_msg_font_size, rl.Color.gold);
+            if (self.new_hover_msg) {
+                try self.curr_hover_msg.buf_print(&self.hover_msg_buf);
+            }
+            rl.drawText(&self.hover_msg_buf, 250, 250, config.hover_msg_font_size, rl.Color.gold);
         }
+
+        // TODO: See if we can do this lazily...
+        // _ = try std.fmt.bufPrintIntToSlice(&self.score_buf, self.score, 10, .lower, .{}); // compiler bug?
+        _ = try std.fmt.bufPrintZ(&self.score_buf, "Score: {d}", .{self.score});
+        rl.drawText(&self.score_buf, 450, 300, config.score_font_size, rl.Color.dark_blue);
     }
 
     fn add_letters(self: *Self, letters: []const u8) !void {
@@ -288,6 +352,26 @@ const GameState = struct {
         }
     }
 
+    fn add_letters_map(self: *Self, letters: set.Set(u8)) !void {
+        if (letters.cardinality() == 0) {
+            return;
+        }
+        const delta = 2.0 * std.math.pi / @as(f32, @floatFromInt(letters.cardinality()));
+        const radius = config.letters_radius;
+        // TODO: determine radius of circle needed for all letter block
+        // circles with given radius to fit with some amount of padding
+        var idx: usize = 0;
+        var iter = letters.iterator();
+        while (iter.next()) |letter| {
+            defer idx += 1;
+
+            const x = self.letters_center.x + radius * std.math.cos(delta * @as(f32, @floatFromInt(idx)));
+            const y = self.letters_center.y + radius * std.math.sin(delta * @as(f32, @floatFromInt(idx)));
+            const block = LetterBlock.init(Vector2.init(x, y), config.letter_circle_radius, letter.*);
+            try self.letter_blocks.append(block);
+        }
+    }
+
     fn add_targets(self: *Self, allocator: std.mem.Allocator, targets: *const std.ArrayList([]const u8)) !void {
         const word_height = rl.measureTextEx(rl.getFontDefault(), "A", config.target_font_size, config.target_spacing).y; // NOTE: string to pass in besides " "? or just grab at comptime?fn
         var max_word_len: u64 = 0;
@@ -295,6 +379,7 @@ const GameState = struct {
 
         for (targets.items, 0..) |word, i| {
             try self.add_target_word(word, curr_pos, allocator);
+            std.debug.print("Target: {s}\n", .{word});
             max_word_len = @max(max_word_len, word.len);
             curr_pos.y += word_height + PADDING;
 
@@ -344,25 +429,31 @@ const GameState = struct {
         }
     }
 
+    // TODO: Have this return a hover message?
     fn submit_word(self: *Self) !void {
         const submission = self.curr_letters.curr_letters.str();
-        std.debug.print("Submission: {s}\n", .{submission});
 
         for (self.target_words.items) |*word| {
             if (!word.visible and std.mem.eql(u8, submission, word.text.str()[0 .. word.text.str().len - 1])) { // Don't compare against the sentinel 0 value
+                self.new_hover_msg = true;
+                self.curr_hover_msg = HoverMessage.target_word(submission);
                 word.visible = true;
+                self.score += @as(u32, @intCast(submission.len)) * config.target_letter_val;
                 return;
             }
         }
 
-        std.debug.print("WHAT? {}\n", .{self.word_store.contains("SHE")});
-        std.debug.print("Word store has it: {}\n", .{self.word_store.contains(submission)});
-        std.debug.print("Bonus words has it: {}\n", .{self.bonus_words.contains(submission)});
-
-        if (self.word_store.contains(submission) and !self.bonus_words.contains(submission)) {
-            _ = try self.bonus_words.add(submission);
-            std.debug.print("Bonus word!", .{});
-            self.curr_hover_msg = HoverMessage.bonus_word(submission);
+        self.new_hover_msg = true;
+        if (self.word_store.contains(submission)) {
+            if (!self.bonus_words.contains(submission)) {
+                _ = try self.bonus_words.add(submission);
+                self.score += @as(u32, @intCast(submission.len)) * config.bonus_letter_val;
+                self.curr_hover_msg = HoverMessage.bonus_word(submission);
+            } else {
+                self.curr_hover_msg = HoverMessage.prev_found_word();
+            }
+        } else {
+            self.curr_hover_msg = HoverMessage.bad_word();
         }
     }
 
@@ -376,19 +467,18 @@ const GameState = struct {
     }
 };
 
-// TODO: Look into using a HashMap([]const u8, bool) to keep track of which bonus
-// words have been used, or just use another hashset
-// work on animations for getting a word, bonus word, etc.
 pub fn main() !void {
     // Initialization
     //--------------------------------------------------------------------------------------
     const screenWidth = 800;
     const screenHeight = 450;
-    var gpa = std.heap.GeneralPurposeAllocator(.{ .verbose_log = true }){};
-    const allocator = gpa.allocator();
+    var gpa = std.heap.GeneralPurposeAllocator(.{ .verbose_log = false }){};
+    const backing_allocator = gpa.allocator();
     defer std.debug.assert(gpa.deinit() == .ok);
-
-    // let's just try to read the words from a file into a hashset...
+    // all of the allocations are tied into the game state...makes sense to use an arena
+    var arena = std.heap.ArenaAllocator.init(backing_allocator);
+    const allocator = arena.allocator();
+    defer arena.deinit();
 
     rl.initWindow(screenWidth, screenHeight, "Word Game");
     defer rl.closeWindow(); // Close window and OpenGL context
@@ -396,26 +486,27 @@ pub fn main() !void {
     rl.setTargetFPS(60); // Set our game to run at 60 frames-per-second
     //--------------------------------------------------------------------------------------
 
-    var targets = std.ArrayList([]const u8).init(allocator);
-    defer targets.deinit();
-    try targets.append("HEY");
-    try targets.append("IT");
-    try targets.append("WORKS");
-    std.sort.insertion([]const u8, targets.items, .{}, GameState.targets_less_than);
+    // var targets = std.ArrayList([]const u8).init(allocator);
+    // defer targets.deinit();
+    // pick 3 random words from the list
+    // get a random number...
+    // try targets.append("HEY");
+    // try targets.append("IT");
+    // try targets.append("WORKS");
 
-    const letters = [_]u8{
-        'H',
-        'E',
-        'Y',
-        'I',
-        'T',
-        'W',
-        'O',
-        'R',
-        'K',
-        'S',
-    };
-    var state = try GameState.init(allocator, &letters, &targets);
+    // const letters = [_]u8{
+    //     'H',
+    //     'E',
+    //     'Y',
+    //     'I',
+    //     'T',
+    //     'W',
+    //     'O',
+    //     'R',
+    //     'K',
+    //     'S',
+    // };
+    var state = try GameState.init(allocator);
     defer state.deinit(allocator);
 
     var last_letter: ?usize = null;
@@ -427,6 +518,7 @@ pub fn main() !void {
     while (!rl.windowShouldClose()) { // Detect window close button or ESC key
         // State update
         //----------------------------------------------------------------------------------
+        defer state.new_hover_msg = false;
         const mouse_pos = rl.getMousePosition();
         const selected_letter = state.check_letter_overlap(mouse_pos);
         if (state.is_building) {
