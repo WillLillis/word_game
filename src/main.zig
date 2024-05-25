@@ -258,7 +258,8 @@ const GameState = struct {
 
         var targets = std.ArrayList([]const u8).init(allocator);
         defer targets.deinit();
-        var gen = std.Random.Xoshiro256.init(42069);
+        // var gen = std.Random.Xoshiro256.init(std.time.milliTimestamp());
+        var gen = std.Random.Xoshiro256.init(@as(u64, @intCast(@max(0, std.time.milliTimestamp()))));
         const random = gen.random();
         for (0..3) |_| {
             const target_idx = std.rand.uintLessThan(random, usize, state.word_store.cardinality() - 1);
@@ -275,18 +276,29 @@ const GameState = struct {
         }
         std.sort.insertion([]const u8, targets.items, .{}, GameState.targets_less_than);
         try state.add_targets(allocator, &targets);
-        // var letters: set.Set(u8) = set.Set(u8).init(allocator);
-        // TODO: Need to do some de-duping here... (need to maintain multiple copies, but only 
-        // the most in any given word
-        // Also shuffle
+
         var letters = std.ArrayList(u8).init(allocator);
         defer letters.deinit();
+        var max_letter_counts: [26]u8 = [_]u8{0} ** 26;
+        var curr_letter_counts: [26]u8 = [_]u8{0} ** 26;
+
         for (targets.items) |word| {
             for (0..word.len) |i| {
-                _ = try letters.append(word[i]);
+                const letter_idx = word[i] - 'A';
+                curr_letter_counts[letter_idx] += 1;
+                if (curr_letter_counts[letter_idx] > max_letter_counts[letter_idx]) {
+                    _ = try letters.append(word[i]);
+                }
+            }
+            for (0..26) |i| {
+                max_letter_counts[i] = @max(max_letter_counts[i], curr_letter_counts[i]);
+                curr_letter_counts[i] = 0;
             }
         }
-        // state.curr_letters = try WordBuilder.init(allocator, letters.cardinality());
+        for (0..letters.items.len) |i| {
+            const swap_idx = std.rand.uintLessThan(random, usize, letters.items.len);
+            std.mem.swap(u8, &letters.items[i], &letters.items[swap_idx]);
+        }
         state.curr_letters = try WordBuilder.init(allocator, letters.items.len);
         try state.add_letters(letters.items);
 
@@ -330,7 +342,6 @@ const GameState = struct {
         }
 
         // TODO: See if we can do this lazily...
-        // _ = try std.fmt.bufPrintIntToSlice(&self.score_buf, self.score, 10, .lower, .{}); // compiler bug?
         _ = try std.fmt.bufPrintZ(&self.score_buf, "Score: {d}", .{self.score});
         rl.drawText(&self.score_buf, 450, 300, config.score_font_size, rl.Color.dark_blue);
     }
@@ -470,8 +481,8 @@ const GameState = struct {
 pub fn main() !void {
     // Initialization
     //--------------------------------------------------------------------------------------
-    const screenWidth = 800;
-    const screenHeight = 450;
+    const screenWidth = 1600;
+    const screenHeight = 900;
     var gpa = std.heap.GeneralPurposeAllocator(.{ .verbose_log = false }){};
     const backing_allocator = gpa.allocator();
     defer std.debug.assert(gpa.deinit() == .ok);
@@ -485,27 +496,6 @@ pub fn main() !void {
 
     rl.setTargetFPS(60); // Set our game to run at 60 frames-per-second
     //--------------------------------------------------------------------------------------
-
-    // var targets = std.ArrayList([]const u8).init(allocator);
-    // defer targets.deinit();
-    // pick 3 random words from the list
-    // get a random number...
-    // try targets.append("HEY");
-    // try targets.append("IT");
-    // try targets.append("WORKS");
-
-    // const letters = [_]u8{
-    //     'H',
-    //     'E',
-    //     'Y',
-    //     'I',
-    //     'T',
-    //     'W',
-    //     'O',
-    //     'R',
-    //     'K',
-    //     'S',
-    // };
     var state = try GameState.init(allocator);
     defer state.deinit(allocator);
 
@@ -513,7 +503,6 @@ pub fn main() !void {
 
     // TODO: Keep track of LetterBlock's we're accumulating,
     // see if we can allow "unselecting"
-
     // Main game loop
     while (!rl.windowShouldClose()) { // Detect window close button or ESC key
         // State update
