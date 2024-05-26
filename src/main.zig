@@ -41,7 +41,7 @@ const config = Config{
     .letter_circle = rl.Color.black,
     .letter_text = rl.Color.white,
     .letter_select = rl.Color.yellow,
-    .letter_center = Vector2.init(300, 300),
+    .letter_center = Vector2.init(500, 500),
     .letter_circle_radius = 20,
     .letters_radius = 100,
     .target_font_size = 50,
@@ -59,6 +59,7 @@ const DisplayMessageTag = enum {
     bonus_word,
     not_a_word,
     prev_found_word,
+    game_over,
 };
 
 const DisplayMessage = union(DisplayMessageTag) {
@@ -66,6 +67,7 @@ const DisplayMessage = union(DisplayMessageTag) {
     bonus_word: u32,
     not_a_word: void,
     prev_found_word: void,
+    game_over: void,
 };
 
 const HoverMessage = struct {
@@ -106,6 +108,10 @@ const HoverMessage = struct {
         return Self{ .message = DisplayMessage{ .prev_found_word = {} }, .time = config.hover_msg_dur };
     }
 
+    fn game_over() Self {
+        return Self{ .message = DisplayMessage{ .game_over = {} }, .time = std.math.inf(f32) };
+    }
+
     fn buf_print(self: *const Self, buf: *[MAX_MSG_LEN:0]u8) !void {
         if (self.message) |msg| {
             switch (msg) {
@@ -120,6 +126,9 @@ const HoverMessage = struct {
                 },
                 .prev_found_word => {
                     _ = try std.fmt.bufPrintZ(buf, "Already found", .{});
+                },
+                .game_over => {
+                    _ = try std.fmt.bufPrintZ(buf, "Game Over!", .{});
                 },
             }
         }
@@ -232,13 +241,13 @@ const GameState = struct {
     const Self = @This();
 
     letter_blocks: std.ArrayList(LetterBlock),
-    target_words: std.ArrayList(TargetBlock), // swap out raw string for some target block
+    target_words: std.ArrayList(TargetBlock),
     curr_letters: WordBuilder,
     is_building: bool = false,
     letters_center: Vector2 = config.letter_center,
-    word_store: set.HashSetManaged([]const u8), // this is using the pointer isn't it...
+    word_store: set.HashSetManaged([]const u8),
     bonus_words: set.Set([]const u8),
-    curr_hover_msg: HoverMessage = HoverMessage.init(), // need to bundle the countdown with the message...
+    curr_hover_msg: HoverMessage = HoverMessage.init(),
     hover_msg_buf: [@max(MAX_WORD_LEN, MAX_MSG_LEN):0]u8 = undefined,
     new_hover_msg: bool = false,
     score: u32 = 0,
@@ -248,21 +257,19 @@ const GameState = struct {
         var state = Self{
             .letter_blocks = std.ArrayList(LetterBlock).init(allocator),
             .target_words = std.ArrayList(TargetBlock).init(allocator),
-            .curr_letters = undefined, //try WordBuilder.init(allocator, letters.len),
-            //.word_store = set.Set([]const u8).init(allocator), // this leads to a crash with an allocation failure
-            .word_store = try set.HashSetManaged([]const u8).initCapacity(allocator, 3000), // this doesn't
+            .curr_letters = undefined,
+            .word_store = set.Set([]const u8).init(allocator),
             .bonus_words = set.Set([]const u8).init(allocator),
         };
-        state.score_buf[state.score_buf.len] = 0; // still needed?
-        try state.load_word_store(allocator, null);
+        // try state.load_word_store_file(allocator, null);
+        try state.load_word_store_static(allocator);
 
         var targets = std.ArrayList([]const u8).init(allocator);
         defer targets.deinit();
-        // var gen = std.Random.Xoshiro256.init(std.time.milliTimestamp());
         var gen = std.Random.Xoshiro256.init(@as(u64, @intCast(@max(0, std.time.milliTimestamp()))));
         const random = gen.random();
         for (0..3) |_| {
-            const target_idx = std.rand.uintLessThan(random, usize, state.word_store.cardinality() - 1);
+            const target_idx = std.rand.uintLessThanBiased(random, usize, state.word_store.cardinality() - 1);
 
             var idx: usize = 0;
             var iter = state.word_store.iterator();
@@ -296,7 +303,7 @@ const GameState = struct {
             }
         }
         for (0..letters.items.len) |i| {
-            const swap_idx = std.rand.uintLessThan(random, usize, letters.items.len);
+            const swap_idx = std.rand.uintLessThanBiased(random, usize, letters.items.len);
             std.mem.swap(u8, &letters.items[i], &letters.items[swap_idx]);
         }
         state.curr_letters = try WordBuilder.init(allocator, letters.items.len);
@@ -343,7 +350,7 @@ const GameState = struct {
 
         // TODO: See if we can do this lazily...
         _ = try std.fmt.bufPrintZ(&self.score_buf, "Score: {d}", .{self.score});
-        rl.drawText(&self.score_buf, 450, 300, config.score_font_size, rl.Color.dark_blue);
+        rl.drawText(&self.score_buf, 800, 500, config.score_font_size, rl.Color.dark_blue);
     }
 
     fn add_letters(self: *Self, letters: []const u8) !void {
@@ -359,26 +366,6 @@ const GameState = struct {
             const x = self.letters_center.x + radius * std.math.cos(delta * @as(f32, @floatFromInt(i)));
             const y = self.letters_center.y + radius * std.math.sin(delta * @as(f32, @floatFromInt(i)));
             const block = LetterBlock.init(Vector2.init(x, y), config.letter_circle_radius, letter);
-            try self.letter_blocks.append(block);
-        }
-    }
-
-    fn add_letters_map(self: *Self, letters: set.Set(u8)) !void {
-        if (letters.cardinality() == 0) {
-            return;
-        }
-        const delta = 2.0 * std.math.pi / @as(f32, @floatFromInt(letters.cardinality()));
-        const radius = config.letters_radius;
-        // TODO: determine radius of circle needed for all letter block
-        // circles with given radius to fit with some amount of padding
-        var idx: usize = 0;
-        var iter = letters.iterator();
-        while (iter.next()) |letter| {
-            defer idx += 1;
-
-            const x = self.letters_center.x + radius * std.math.cos(delta * @as(f32, @floatFromInt(idx)));
-            const y = self.letters_center.y + radius * std.math.sin(delta * @as(f32, @floatFromInt(idx)));
-            const block = LetterBlock.init(Vector2.init(x, y), config.letter_circle_radius, letter.*);
             try self.letter_blocks.append(block);
         }
     }
@@ -401,7 +388,7 @@ const GameState = struct {
         }
     }
 
-    fn load_word_store(self: *Self, allocator: std.mem.Allocator, path: ?[]const u8) !void {
+    fn load_word_store_file(self: *Self, allocator: std.mem.Allocator, path: ?[]const u8) !void {
         var file: std.fs.File = undefined;
         if (path) |custom_path| {
             if (std.fs.path.isAbsolute(custom_path)) {
@@ -416,6 +403,15 @@ const GameState = struct {
 
         var buf: [32]u8 = undefined;
         while (try in_stream.readUntilDelimiterOrEof(&buf, '\n')) |line| {
+            const copy = try allocator.dupe(u8, line);
+            _ = try self.word_store.add(copy);
+        }
+    }
+
+    fn load_word_store_static(self: *Self, allocator: std.mem.Allocator) !void {
+        const words = @embedFile("./words.txt");
+        var iter = std.mem.splitScalar(u8, words, '\n');
+        while (iter.next()) |line| {
             const copy = try allocator.dupe(u8, line);
             _ = try self.word_store.add(copy);
         }
@@ -446,10 +442,21 @@ const GameState = struct {
 
         for (self.target_words.items) |*word| {
             if (!word.visible and std.mem.eql(u8, submission, word.text.str()[0 .. word.text.str().len - 1])) { // Don't compare against the sentinel 0 value
-                self.new_hover_msg = true;
-                self.curr_hover_msg = HoverMessage.target_word(submission);
                 word.visible = true;
                 self.score += @as(u32, @intCast(submission.len)) * config.target_letter_val;
+                self.new_hover_msg = true;
+                var finished = true;
+                for (self.target_words.items) |w| {
+                    if (!w.visible) {
+                        finished = false;
+                        break;
+                    }
+                }
+                if (finished) {
+                    self.curr_hover_msg = HoverMessage.game_over();
+                } else {
+                    self.curr_hover_msg = HoverMessage.target_word(submission);
+                }
                 return;
             }
         }
